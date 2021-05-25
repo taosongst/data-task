@@ -1,0 +1,359 @@
+---
+title: "Data Exploration"
+author: Tao Song
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    pandoc_args: ["--lua-filter=color.lua"]
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE,
+                      tidy = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE,
+                      cache = TRUE,
+                      cache.lazy = FALSE,
+                      fig.align = "center")
+
+options(width = 110, digits = 2, scipen = 999)
+```
+
+```{cat, engine.opts = list(file = "color-text.lua")}
+Span = function(el)
+  color = el.attributes['color']
+  -- if no color attribute, return unchange
+  if color == nil then return el end
+  
+  -- tranform to <span style="color: red;"></span>
+  if FORMAT:match 'html' then
+    -- remove color attributes
+    el.attributes['color'] = nil
+    -- use style attribute instead
+    el.attributes['style'] = 'color: ' .. color .. ';'
+    -- return full span element
+    return el
+  elseif FORMAT:match 'latex' then
+    -- remove color attributes
+    el.attributes['color'] = nil
+    -- encapsulate in latex code
+    table.insert(
+      el.content, 1,
+      pandoc.RawInline('latex', '\\textcolor{'..color..'}{')
+    )
+    table.insert(
+      el.content,
+      pandoc.RawInline('latex', '}')
+    )
+    -- returns only span content
+    return el.content
+  else
+    -- for other format return unchanged
+    return el
+  end
+end
+```
+
+
+```{r load packages}
+library(tidyverse)
+library(haven)
+
+library(lwgeom)
+library(viridis)
+library(ggpmisc)
+library(cowplot)
+library(broom)
+library(kableExtra)
+
+library(janitor)
+library(data.table)
+```
+
+# Section 1: Data exploration
+
+```{r}
+phd <- read_csv('../phq_all_final.csv')
+phd <- phd %>% mutate(day = format(phd$date,"%Y-%m-%d"),
+               patient_day_created = format(phd$patient_date_created,"%Y-%m-%d"),
+               time = format(phd$date,"%H:%M:%S"),
+               patient_time_created = format(phd$patient_date_created,"%H:%M:%S"),
+               am.pm = ifelse(lubridate::am(phd$date), 'am', 'pm'))
+
+###############################################
+##   Create a wide format patient record     ##
+###############################################
+##### I excluded patient 10687 who has over 80 visits.
+wide <- phd %>% filter(patient_id != 10687) %>% select(-c(patient_date_created,type,patient_day_created,patient_time_created,am.pm)) %>% group_by(patient_id) %>% mutate(visit = paste0("visit_",dplyr::row_number())) %>% pivot_wider(names_from = visit, values_from = c(score, date, day, time))
+
+visit_frequency <- phd %>% group_by(patient_id) %>% summarise(number_of_visits = n())
+
+wide <- merge(merge(merge(merge(wide, visit_frequency, by = 'patient_id'), phd %>% select(c(patient_id, patient_date_created,patient_day_created,patient_time_created)) %>% distinct(patient_id, .keep_all = T), by = 'patient_id', all.x = T), phd[!duplicated(phd[, c('patient_id')], fromLast = T),] %>% select(patient_id, score) %>% rename(last_visit = score), by = 'patient_id', all.x = T), phd[!duplicated(phd[, c('patient_id')], fromLast = F),] %>% select(patient_id, score, day) %>% rename(first_visit = score, first_visit_day = day), by = 'patient_id', all.x = T)
+
+long <- merge(phd, visit_frequency, by = 'patient_id', all.x = T) 
+long <- long %>% group_by(patient_id) %>% 
+  mutate(visit = paste0("visit_",dplyr::row_number()),
+         visit2 = dplyr::row_number()) 
+
+write_csv(long, '../phq_all_long_format.csv')
+write_csv(wide, '../phq_all_wide_format.csv')
+
+```
+
+
+
+```{r density and box plots}
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+p1 <- ggplot(wide) +
+  geom_density(aes(number_of_visits)) +
+  geom_vline(aes(xintercept = getmode(number_of_visits)),
+             color = 'red',linetype = 'dashed') +
+  geom_vline(aes(xintercept = mean(number_of_visits)), color = 'blue',linetype = 'dashed') +
+  scale_x_continuous(breaks = c(1,3.5,10,20,30,40)) +
+  labs(title = "Density plot: the number of visits") +
+  xlab("Number of visits") +
+  ylab("Density") +
+  hrbrthemes::theme_ipsum()
+
+p2 <- ggplot(wide) +
+  geom_density(aes(first_visit)) +
+  geom_vline(aes(xintercept = getmode(first_visit)), color = 'red',linetype = 'dashed') +
+  geom_vline(aes(xintercept = mean(first_visit)),color = 'blue',linetype = 'dashed') +
+  scale_x_continuous(breaks = c(0,5.5,10,20,30,40)) +
+  labs(title = "Density plot: First-visit Score") +
+  xlab("First-visit Score") +
+  ylab("Density") +
+  hrbrthemes::theme_ipsum()
+
+
+p3 <- ggplot(wide) +
+  geom_density(aes(last_visit)) +
+  geom_vline(aes(xintercept = getmode(last_visit)),
+             color = 'red',linetype = 'dashed') +
+  geom_vline(aes(xintercept = mean(last_visit)),color = 'blue',linetype = 'dashed') +
+  scale_x_continuous(breaks = c(0,4.9,10,20,30,40)) +
+  labs(title = "Density plot: Last-visit Score") +
+  xlab("Last-visit Score") +
+  ylab("Density") +
+  hrbrthemes::theme_ipsum()
+
+wide2 <- bind_rows(wide %>% select(patient_id, first_visit, number_of_visits) %>% rename(score = first_visit) %>% mutate(type = "first_visit"), wide %>% select(patient_id, last_visit, number_of_visits) %>% rename(score = last_visit) %>% mutate(type = "last_visit"))
+
+p4 <- ggplot(wide2, aes(x = as.factor(type), y = score)) +
+  geom_boxplot(fill="slateblue", alpha=0.2) +
+  xlab("First VS. Last Visit") +
+  ylab("Score") +
+  labs(title = 'Boxplot: Score at First-visit VS. Last-visit') +
+  theme(title = element_text(size = 8)) +
+  hrbrthemes::theme_ipsum()
+
+p5 <- ggplot(wide2 %>% filter(number_of_visits >= 5), aes(x = as.factor(type), y = score)) +
+  geom_boxplot(fill="slateblue", alpha=0.2) +
+  xlab("First VS. Last Visit") +
+  ylab("Score") +
+  labs(title = 'Boxplot: Score at First-visit VS. Last-visit',
+       subtitle = "Subset to people who have visited 5 times or more.") +
+  theme(title = element_text(size = 8)) +
+  hrbrthemes::theme_ipsum()
+
+wide3 <- bind_rows(wide %>% filter(first_visit >= 10) %>% select(patient_id, first_visit, number_of_visits) %>% rename(score = first_visit) %>% mutate(type = "first_visit"), wide %>% filter(first_visit >= 10) %>% select(patient_id, last_visit, number_of_visits) %>% rename(score = last_visit) %>% mutate(type = "last_visit"))
+
+p6 <- ggplot(wide3, aes(x = as.factor(type), y = score)) +
+  geom_boxplot(fill="slateblue", alpha=0.2) +
+  xlab("First VS. Last Visit") +
+  ylab("Score") +
+  labs(title = 'Boxplot: Score at First-visit VS. Last-visit',
+       subtitle = "Subset to people whose first-visit score exceeded 10 (including 10).") +
+  theme(title = element_text(size = 8)) +
+  hrbrthemes::theme_ipsum()
+
+p7 <- ggplot(wide %>% filter(first_visit >= 10)) +
+  geom_density(aes(number_of_visits)) +
+  geom_vline(aes(xintercept = 1),
+             color = 'red',linetype = 'dashed') +
+  geom_vline(aes(xintercept = 3.4), color = 'blue',linetype = 'dashed') +
+  scale_x_continuous(breaks = c(1,3.4,10,20,30,40)) +
+  labs(title = "Density plot: the number of visits",
+       subtitle = "Subset to people whose first-visit score exceeded 10 (including 10).") +
+  xlab("Number of visits") +
+  ylab("Density") +
+  hrbrthemes::theme_ipsum()
+
+a <- wide %>% filter(number_of_visits >=3.4,
+                first_visit >= 10) %>% mutate(type = "sufficiently_treated",
+                                              treatment = "3.4 visits")
+b <- wide %>% filter(number_of_visits <3.4,
+                first_visit >= 10) %>% mutate(type = "insufficiently_treated",
+                                              treatment = "3.4 visits")
+severe_patients1 <- bind_rows(a,b)
+
+a <- wide %>% filter(number_of_visits >=5,
+                first_visit >= 10) %>% mutate(type = "sufficiently_treated",
+                                              treatment = "5 visits")
+b <- wide %>% filter(number_of_visits <5,
+                first_visit >= 10) %>% mutate(type = "insufficiently_treated",
+                                              treatment = "5 visits")
+severe_patients2 <- bind_rows(a,b)
+
+a <- wide %>% filter(number_of_visits >=10,
+                first_visit >= 10) %>% mutate(type = "sufficiently_treated",
+                                              treatment = "10 visits")
+b <- wide %>% filter(number_of_visits <10,
+                first_visit >= 10) %>% mutate(type = "insufficiently_treated",
+                                              treatment = "10 visits")
+severe_patients3 <- bind_rows(a,b)
+severe_patients <- bind_rows(severe_patients1,severe_patients2,severe_patients3)
+
+p8 <- ggplot(severe_patients, aes(x = factor(type, levels = c("insufficiently_treated",'sufficiently_treated')), y = last_visit)) +
+  geom_boxplot(fill="slateblue", alpha=0.2) +
+  xlab("The effect of treatment") +
+  ylab("Last-visit Score") +
+  labs(title = 'Boxplot: The effect of treatment',
+       subtitle = "Subset to people whose first-visit score exceeded 10 (including 10).
+If patients were treated for different lengths of time.") +
+  theme(title = element_text(size = 8)) +
+  facet_wrap(~factor(treatment, levels = c("3.4 visits","5 visits","10 visits"))) +
+  hrbrthemes::theme_ipsum()
+
+ p9 <- ggplot(wide %>% filter(first_visit >= 10)) +
+  geom_density(aes(first_visit)) +
+  geom_vline(aes(xintercept = getmode(first_visit)), color = 'red',linetype = 'dashed') +
+  geom_vline(aes(xintercept = mean(first_visit)),color = 'blue',linetype = 'dashed') +
+  scale_x_continuous(breaks = c(10, 14,20,30,40)) +
+  labs(title = "Density plot: First-visit Score",
+       subtitle = "Subset to people whose first-visit score exceeded 10 (including 10).") +
+  xlab("First-visit Score") +
+  ylab("Density") +
+  hrbrthemes::theme_ipsum()
+ 
+p10 <- ggplot(wide %>% filter(first_visit >= 10)) +
+  geom_density(aes(last_visit)) +
+  geom_vline(aes(xintercept = getmode(last_visit)), color = 'red',linetype = 'dashed') +
+  geom_vline(aes(xintercept = mean(last_visit)),color = 'blue',linetype = 'dashed') +
+  scale_x_continuous(breaks = c(0,10,12,20,30,40)) +
+  labs(title = "Density plot: Last-visit Score",
+       subtitle = "Subset to people whose first-visit score exceeded 10 (including 10).") +
+  xlab("Last-visit Score") +
+  ylab("Density") +
+  hrbrthemes::theme_ipsum()
+
+ggsave(filename = "../Figures/p8.png",
+       plot = p8,
+       bg = "transparent",
+       width = 10, height = 7, units = "in",dpi = 800)
+
+p8
+```
+
+
+
+```{r patient level time-series}
+wide$first_visit_day <- as.Date(wide$first_visit_day)
+long$day <- as.Date(long$day)
+patient <- wide %>% filter(first_visit >= 10) %>% mutate(improve = ifelse(last_visit<first_visit,1,0))
+patient_long <- long %>% filter(patient_id %in% patient$patient_id)
+
+
+pp1 <- ggplot(patient_long, aes(x = visit2, y = score)) +
+  geom_point() + 
+  geom_smooth(method = 'lm', formula = y ~ x, se = T) +
+  labs(title = "Linear Regression: Score on each visit",
+       subtitle = "Subset to people whose first-visit score exceeded 10 (including 10).") +
+  xlab("Visits") +
+  ylab("Anxiety score") +
+  ggpubr::stat_regline_equation(
+    aes(label =  paste(..eq.label.., ..adj.rr.label.., sep = "~~~~")),
+                                    label.x.npc = 0.67, label.y.npc = 0.97) +
+  ggpubr::stat_cor(label.x.npc = 0.78, label.y.npc = 0.8, p.accuracy = 0.001) +
+  hrbrthemes::theme_ipsum()
+
+pp2 <- ggplot(patient, aes(x = number_of_visits, y = improve)) +
+  geom_point() +
+  geom_smooth(method = 'glm',method.args = list(family=binomial)) +
+  geom_hline(yintercept = 0.5, color = "red") +
+  annotate("text", x = 37, y = 0.545, label = "Probability of 0.5") +
+  annotate("text", x = 37, y = 0.885, label = "Coefficient: 0.52 \n(statistically significant)") +
+  labs(title = "Logistic Regression: If clinical visits increase\n the probability of decreasing anxiety score.",
+       subtitle = "Subset to people whose first-visit score exceeded 10 (including 10).") +
+  xlab("Visit Frequency") +
+  ylab("Probability of improvement") +
+  hrbrthemes::theme_ipsum()
+
+
+```
+
+```{r random exploration}
+#### If am / pm is influencing anxiety score
+
+ppp1 <- ggplot(long %>% filter(visit == c("visit_1")), aes(x = as.factor(am.pm), y = score)) +
+  geom_boxplot(fill="slateblue", alpha=0.2) +
+  xlab("am. VS. pm.") +
+  ylab("Score") +
+  labs(title = 'Boxplot: Score on first_visit at am. VS. pm.') +
+  theme(title = element_text(size = 8)) +
+  hrbrthemes::theme_ipsum()
+
+ppp2 <- ggplot(long, aes(x = as.factor(am.pm), y = score)) +
+  geom_boxplot(fill="slateblue", alpha=0.2) +
+  xlab("am. VS. pm.") +
+  ylab("Score") +
+  labs(title = 'Boxplot: Scores in general at am. VS. pm.') +
+  theme(title = element_text(size = 8)) +
+  hrbrthemes::theme_ipsum()
+
+#### If time is influencing score
+
+ppp3 <- ggplot(data = long, aes(x = day, y = score)) +
+  geom_smooth() +
+  xlab("Dates") +
+  ylab("Score") +
+  labs(title = 'Anxiety level in general over time') +
+  theme(title = element_text(size = 8)) +
+  hrbrthemes::theme_ipsum()
+
+ppp4 <- ggplot(data = long %>% filter(visit == 'visit_1'), aes(x = day, y = score)) +
+  geom_smooth() +
+  xlab("Dates") +
+  ylab("Score") +
+  labs(title = 'Anxiety level on first-visit over time') +
+  theme(title = element_text(size = 8)) +
+  hrbrthemes::theme_ipsum()
+
+ppp5 <- ggplot(data = patient_long, aes(x = day, y = score)) +
+  geom_point(alpha=0.3) +
+  geom_smooth() +
+  #scale_y_continuous(limits = c(10,15)) +
+  xlab("Dates") +
+  ylab("Score") +
+  labs(title = 'Anxiety level in general over time',
+       subtitle = "Subset to people whose first-visit score exceeded 10 (including 10).") +
+  theme(title = element_text(size = 8)) +
+  hrbrthemes::theme_ipsum()
+
+
+ppp6 <- ggplot(data = patient_long %>% filter(visit == 'visit_1'), aes(x = day, y = score)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth() +
+  scale_y_continuous(limits = c(10,15)) +
+  xlab("Dates") +
+  ylab("Score") +
+  labs(title = 'Anxiety level on first-visit over time',
+       subtitle = "Subset to people whose first-visit score exceeded 10 (including 10).") +
+  theme(title = element_text(size = 8)) +
+  hrbrthemes::theme_ipsum()
+
+ggsave(filename = "../Figures/ppp6.png",
+       plot = ppp6,
+       bg = "transparent",
+       width = 6, height = 4, units = "in",dpi = 800)
+
+```
+
