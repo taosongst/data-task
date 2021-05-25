@@ -1,2 +1,4 @@
 # data_task
-For Tao.
+For the first task, see report.pdf
+
+For the sql task, see sql.sql
